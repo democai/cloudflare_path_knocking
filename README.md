@@ -8,6 +8,7 @@ Similar to "port knocking" in traditional firewalls, this system uses HTTP path 
 
 This can be useful for:
 - Creating temporary access to protected resources
+- Ensuring logged in or legitimate users bypass bot mitigation and rate limiting rules
 - Implementing emergency access mechanisms
 - Building dynamic IP whitelisting systems
 - Creating "secret" access paths for authorized users
@@ -84,8 +85,9 @@ The system can be customized in several ways:
 
 ## Logging
 
-The system can log whitelisting actions, which is useful for auditing and monitoring. 
+The system can log whitelisting actions, which is useful for auditing and monitoring.
 Enable or disable this feature with the `logToSplunk` configuration option.
+Not implemented.
 
 ## Limitations
 
