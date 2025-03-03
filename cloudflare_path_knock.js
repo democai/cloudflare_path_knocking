@@ -1,27 +1,38 @@
 // Path Knocking Worker for Cloudflare
-// Automatically adds IPs to an Allow List when they hit specific paths
+// Automatically manages IPs in Cloudflare IP Lists based on path access patterns
 
-// Configuration
-const CONFIG = {
-  // Paths that trigger IP whitelisting
-  triggerPaths: {
-    prefixes: ['/prefix/'],    // Any path starting with these will trigger
-    exact: ['/auth_check']  // These exact paths will trigger
-  },
-  // Cloudflare API settings
-  cloudflare: {
-    accountId: 'YOUR_ACCOUNT_ID',
-    zoneId: 'YOUR_ZONE_ID',
-    apiToken: 'YOUR_API_TOKEN',  // Token needs IP Access Rules edit permission
-    listId: 'YOUR_IP_LIST_ID'    // ID of the IP Access List to modify
-  },
-  // Settings for the IP whitelisting
-  whitelisting: {
-    expirationHours: 24,  // How long IPs stay on the whitelist (in hours)
-    notes: 'Added via path knocking',  // Note added to the whitelist entry
-    logToSplunk: true,  // Whether to log whitelisting actions to Splunk
-  }
+// Cloudflare API Configuration
+const CLOUDFLARE_CONFIG = {
+  accountId: 'YOUR_ACCOUNT_ID',
+  zoneId: 'YOUR_ZONE_ID',
+  apiToken: 'YOUR_API_TOKEN',  // Token needs IP Access Rules edit permission
 };
+
+// List Configurations
+const LISTS = [
+  {
+    name: 'whitelist',
+    listId: 'YOUR_WHITELIST_ID',
+    mode: 'whitelist',
+    notes: 'Added via path knocking',
+    expirationHours: 24,
+    triggerPaths: {
+      prefixes: ['/prefix/'],
+      exact: ['/auth_check']
+    }
+  },
+  {
+    name: 'honeypot',
+    listId: 'YOUR_HONEYPOT_LIST_ID',
+    mode: 'block',
+    notes: 'Added via honeypot detection',
+    expirationHours: 168,
+    triggerPaths: {
+      prefixes: ['/admin/debug/', '/wp-admin/'],
+      exact: ['/config.php', '/.env', '/phpinfo.php']
+    }
+  }
+];
 
 addEventListener('fetch', event => {
   event.respondWith(handleRequest(event.request));
@@ -30,73 +41,72 @@ addEventListener('fetch', event => {
 async function handleRequest(request) {
   const url = new URL(request.url);
   const clientIP = request.headers.get('CF-Connecting-IP');
+  const path = url.pathname;
   
-  // Check if the request path matches our trigger paths
-  const isPathKnock = isKnockPath(url.pathname);
+  // Check path against all configured lists
+  const matchedList = checkPath(path);
   
-  if (isPathKnock) {
-    console.log(`Path knock detected from IP: ${clientIP} on path: ${url.pathname}`);
+  if (matchedList) {
+    console.log(`${matchedList.name} path accessed from IP: ${clientIP} on path: ${path}`);
     
     try {
-      // Add the IP to our allow list
-      await addIpToAllowList(clientIP);
+      // Add the IP to the matched list
+      await addIpToList(clientIP, matchedList);
       
-      // Log the successful whitelisting if configured
-      if (CONFIG.whitelisting.logToSplunk) {
-        await logWhitelistAction(clientIP, url.pathname);
-      }
-      
-      // Continue with the original request and return its response
-      // This ensures normal functionality while adding the IP to the allow list
-      return fetch(request);
+      // Log the action
+      await logAction(clientIP, path, matchedList);
     } catch (error) {
-      console.error(`Error whitelisting IP: ${error}`);
-      // Still process the original request even if whitelisting fails
-      return fetch(request);
+      console.error(`Error processing IP for ${matchedList.name}: ${error}`);
     }
   }
   
-  // For non-knock paths, just pass through the request
+  // Always fetch and return the server's response
   return fetch(request);
 }
 
-// Check if the given path should trigger the knock mechanism
-function isKnockPath(path) {
+// Check if the given path matches any of our configured lists
+// Returns the matching list configuration or null
+function checkPath(path) {
+  return LISTS.find(list => isPathInList(path, list.triggerPaths));
+}
+
+// Helper function to check if a path is in a path list
+function isPathInList(path, pathList) {
   // Check if the path starts with any of our prefix triggers
-  const matchesPrefix = CONFIG.triggerPaths.prefixes.some(prefix => 
+  const matchesPrefix = pathList.prefixes.some(prefix => 
     path.startsWith(prefix)
   );
   
   // Check if the path exactly matches any of our exact triggers
-  const matchesExact = CONFIG.triggerPaths.exact.includes(path);
+  const matchesExact = pathList.exact.includes(path);
   
   return matchesPrefix || matchesExact;
 }
 
-// Add an IP to the Cloudflare IP Allow List
-async function addIpToAllowList(ip) {
+// Add an IP to the Cloudflare IP List with the specified list configuration
+async function addIpToList(ip, listConfig) {
   // Calculate expiration time
   const expirationTime = new Date();
-  expirationTime.setHours(expirationTime.getHours() + CONFIG.whitelisting.expirationHours);
+  expirationTime.setHours(expirationTime.getHours() + listConfig.expirationHours);
   
   const data = {
-    mode: "whitelist",
+    mode: listConfig.mode,
     configuration: {
       target: "ip",
       value: ip
     },
-    notes: CONFIG.whitelisting.notes,
+    notes: listConfig.notes,
     expires_on: expirationTime.toISOString()
   };
   
   // Using Cloudflare's API to add the IP to an IP List
   const response = await fetch(
-    `https://api.cloudflare.com/client/v4/accounts/${CONFIG.cloudflare.accountId}/rules/lists/${CONFIG.cloudflare.listId}/items`, 
+    `https://api.cloudflare.com/client/v4/accounts/${CLOUDFLARE_CONFIG.accountId}/rules/lists/${listConfig.listId}/items`, 
     {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
-        'Authorization': `Bearer ${CONFIG.cloudflare.apiToken}`
+        'Authorization': `Bearer ${CLOUDFLARE_CONFIG.apiToken}`
       },
       body: JSON.stringify([data])
     }
@@ -111,17 +121,16 @@ async function addIpToAllowList(ip) {
   return result;
 }
 
-// Log the whitelist action to a logging system
-async function logWhitelistAction(ip, path) {
+// Log an action to the console
+async function logAction(ip, path, listConfig) {
   const logData = {
     timestamp: new Date().toISOString(),
-    action: "whitelist_ip",
+    action: `${listConfig.name}_ip_${listConfig.mode}`,
     ip: ip,
-    trigger_path: path,
-    expiration_hours: CONFIG.whitelisting.expirationHours
+    path: path,
+    list_name: listConfig.name,
+    expiration_hours: listConfig.expirationHours
   };
   
-  console.log(`WHITELIST_LOG: ${JSON.stringify(logData)}`);
-  
+  console.log(`${listConfig.name.toUpperCase()}_LOG: ${JSON.stringify(logData)}`);
 }
-
