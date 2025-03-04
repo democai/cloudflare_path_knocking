@@ -78,6 +78,63 @@ Each list configuration supports:
   - `prefixes`: Array of path prefixes that trigger the list
   - `exact`: Array of exact paths that trigger the list
 
+### Creating IP Lists
+
+Before deploying the worker, you'll need to create the IP lists in Cloudflare. IP lists are part of Cloudflare's custom lists feature and are defined at the account level. Here's how to set them up:
+
+1. **Create the IP Lists**
+
+For each list in your configuration (whitelist, honeypot, etc.), create a new IP list using the Cloudflare API:
+
+```bash
+curl https://api.cloudflare.com/client/v4/accounts/{account_id}/rules/lists \
+--header "X-Auth-Email: <EMAIL>" \
+--header "X-Auth-Key: <API_KEY>" \
+--header "Content-Type: application/json" \
+--data '{
+  "name": "path_knock_whitelist",
+  "description": "IPs allowed via path knocking",
+  "kind": "ip"
+}'
+```
+
+Save the returned `list_id` - you'll need it for the worker configuration.
+
+2. **Create Rules to Use the Lists**
+
+After creating your lists, you need to create rules that use them. For example, to use a whitelist:
+
+```bash
+curl https://api.cloudflare.com/client/v4/accounts/{account_id}/rulesets/{ruleset_id}/rules \
+--header "Authorization: Bearer <API_TOKEN>" \
+--header "Content-Type: application/json" \
+--data '{
+  "action": "skip",
+  "action_parameters": {
+    "ruleset": "current"
+  },
+  "expression": "ip.src in $path_knock_whitelist",
+  "description": "Allow IPs from path knocking whitelist",
+  "enabled": true
+}'
+```
+
+For a honeypot block list:
+
+```bash
+curl https://api.cloudflare.com/client/v4/accounts/{account_id}/rulesets/{ruleset_id}/rules \
+--header "Authorization: Bearer <API_TOKEN>" \
+--header "Content-Type: application/json" \
+--data '{
+  "action": "block",
+  "expression": "ip.src in $honeypot_list",
+  "description": "Block IPs that triggered honeypot paths",
+  "enabled": true
+}'
+```
+
+Note: Currently, IP lists only support IPv4 addresses, not IPv6.
+
 ### Deployment Steps
 
 1. Create a new CloudFlare Worker
